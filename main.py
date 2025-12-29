@@ -7,7 +7,7 @@ from typing import List, Optional
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -21,13 +21,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ====================== НАСТРОЙКИ =========================
-# ОБЯЗАТЕЛЬНО: перед запуском на хосте:
-# - создай переменную окружения BOT_TOKEN с токеном бота
-# - в ADMINS впиши свой Telegram ID
-
+# На Render токен задаём переменной окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8216135835:AAE91Pn47KnHmtGG-QWsSSQnp4G-0xFW6ig"
 
-# сюда впиши свои Telegram ID админов, например: {111111111, 222222222}
+# сюда впиши свои Telegram‑ID админов, например {111111111, 222222222}
 ADMINS = {5240248802}
 
 DB_PATH = "tour_agency.db"
@@ -325,7 +322,6 @@ def app_confirm_kb() -> InlineKeyboardMarkup:
 
 
 def user_after_status_kb() -> InlineKeyboardMarkup:
-    """Кнопки под уведомлением пользователю после решения по заявке."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -393,7 +389,7 @@ async def cmd_start(message: Message):
 # ---------- Пользовательское меню: заявка ----------
 
 
-@router.message(F.text == "🏖 Подобрать тур")
+@router.message(StateFilter(None), F.text == "🏖 Подобрать тур")
 async def start_app_form(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(AppForm.destination)
@@ -527,7 +523,6 @@ async def app_send(callback: CallbackQuery, state: FSMContext):
 
     app_id = db.create_application(user_row, data)
 
-    # сообщение пользователю
     await callback.message.answer(
         f"✅ <b>Заявка №{app_id} отправлена менеджеру.</b>\n\n"
         "Мы свяжемся с вами в ближайшее время.",
@@ -535,7 +530,6 @@ async def app_send(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer("Заявка отправлена")
 
-    # уведомление админам
     summary = (
         f"📩 <b>Новая заявка №{app_id}</b>\n"
         f"От: @{callback.from_user.username or 'без_username'} (ID {callback.from_user.id})\n\n"
@@ -569,7 +563,7 @@ def human_status(code: str) -> str:
     }.get(code, code)
 
 
-@router.message(F.text == "📋 Мои заявки")
+@router.message(StateFilter(None), F.text == "📋 Мои заявки")
 async def my_apps(message: Message):
     user = db.get_user_by_tg(message.from_user.id)
     if not user:
@@ -596,7 +590,7 @@ async def my_apps(message: Message):
 # ---------- Повторить последнюю заявку ----------
 
 
-@router.message(F.text == "🔁 Повторить заявку")
+@router.message(StateFilter(None), F.text == "🔁 Повторить заявку")
 async def repeat_last_app(message: Message):
     user = db.get_user_by_tg(message.from_user.id)
     if not user:
@@ -687,7 +681,7 @@ async def repeat_cancel(callback: CallbackQuery):
 # ---------- Инфо, FAQ и поддержка ----------
 
 
-@router.message(F.text == "ℹ️ О компании")
+@router.message(StateFilter(None), F.text == "ℹ️ О компании")
 async def about(message: Message):
     await message.answer(
         "🌍 <b>Anex Tour — подбор путешествий под ваши желания.</b>\n\n"
@@ -696,7 +690,7 @@ async def about(message: Message):
     )
 
 
-@router.message(F.text == "❓ FAQ")
+@router.message(StateFilter(None), F.text == "❓ FAQ")
 async def faq(message: Message):
     text = (
         "❓ <b>Частые вопросы</b>\n\n"
@@ -714,7 +708,7 @@ async def faq(message: Message):
     await message.answer(text)
 
 
-@router.message(F.text == "🆘 Связаться с менеджером")
+@router.message(StateFilter(None), F.text == "🆘 Связаться с менеджером")
 async def contact_manager(message: Message):
     await message.answer(
         "🆘 <b>Связь с менеджером</b>\n\n"
@@ -723,6 +717,7 @@ async def contact_manager(message: Message):
 
 
 @router.message(
+    StateFilter(None),
     F.text
     & ~F.text.in_(
         {
@@ -740,6 +735,7 @@ async def forward_to_admins(message: Message):
     """
     Любое «обычное» текстовое сообщение считаем обращением
     к менеджеру и пересылаем админам.
+    Работает только когда НЕТ активного состояния (StateFilter(None)).
     """
     text = (
         f"📨 Сообщение от пользователя @{message.from_user.username or 'без_username'} "
@@ -773,10 +769,10 @@ async def user_contact(callback: CallbackQuery):
     await callback.answer()
 
 
-# ---------- Админ-панель (кнопка в меню) ----------
+# ---------- Админ‑панель ----------
 
 
-@admin_router.message(F.text == "🛠 Админ‑панель")
+@admin_router.message(StateFilter(None), F.text == "🛠 Админ‑панель")
 async def admin_panel(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет доступа к админ‑панели.")
@@ -862,7 +858,6 @@ async def admin_open(callback: CallbackQuery):
         await callback.answer()
         return
 
-    # если была новая — переведём в "в обработке"
     if a["status"] == "new":
         db.update_application_status(app_id, "in_progress", callback.from_user.id, a["admin_comment"] or "")
         a = db.get_application(app_id)
@@ -872,7 +867,7 @@ async def admin_open(callback: CallbackQuery):
     await callback.answer()
 
 
-# ---------- Одобрение заявки ----------
+# ---------- Одобрение / отклонение заявки ----------
 
 
 @admin_router.callback_query(F.data.startswith("adm:approve:"))
@@ -888,7 +883,6 @@ async def admin_approve_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # запоминаем ID заявки и сообщение, под которым жали кнопку
     await state.set_state(ApproveForm.comment)
     await state.update_data(
         app_id=app_id,
@@ -915,14 +909,11 @@ async def admin_approve_finish(message: Message, state: FSMContext):
     if comment == "-":
         comment = ""
 
-    # обновляем статус
     db.update_application_status(app_id, "approved", message.from_user.id, comment)
     a = db.get_application(app_id)
 
-    # очищаем состояние
     await state.clear()
 
-    # убираем клавиатуру с исходного сообщения
     if src_chat_id and src_msg_id:
         try:
             await bot.edit_reply_markup(chat_id=src_chat_id, message_id=src_msg_id, reply_markup=None)
@@ -931,7 +922,6 @@ async def admin_approve_finish(message: Message, state: FSMContext):
 
     await message.answer(f"Заявка №{app_id} отмечена как <b>одобренная</b>.")
 
-    # уведомим клиента
     try:
         text = (
             f"✅ <b>Ваша заявка №{app_id} одобрена менеджером.</b>\n\n"
@@ -947,9 +937,6 @@ async def admin_approve_finish(message: Message, state: FSMContext):
         pass
 
 
-# ---------- Отклонение заявки ----------
-
-
 @admin_router.callback_query(F.data.startswith("adm:reject:"))
 async def admin_reject_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -963,7 +950,6 @@ async def admin_reject_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # запоминаем ID заявки и сообщение, под которым жали кнопку
     await state.set_state(RejectForm.comment)
     await state.update_data(
         app_id=app_id,
@@ -994,7 +980,6 @@ async def admin_reject_finish(message: Message, state: FSMContext):
 
     await state.clear()
 
-    # убираем клавиатуру с исходного сообщения
     if src_chat_id and src_msg_id:
         try:
             await bot.edit_reply_markup(chat_id=src_chat_id, message_id=src_msg_id, reply_markup=None)
@@ -1003,7 +988,6 @@ async def admin_reject_finish(message: Message, state: FSMContext):
 
     await message.answer(f"Заявка №{app_id} отмечена как <b>отклонённая</b>.")
 
-    # уведомим клиента
     try:
         text = (
             f"❌ <b>Ваша заявка №{app_id} отклонена.</b>\n\n"
@@ -1019,7 +1003,7 @@ async def admin_reject_finish(message: Message, state: FSMContext):
 
 async def main():
     if BOT_TOKEN == "ВАШ_ТОКЕН_БОТА_ОТ_BOTFATHER":
-        print("⚠️ Укажи реальный BOT_TOKEN в коде или в переменной окружения BOT_TOKEN.")
+        print("⚠️ Укажи реальный BOT_TOKEN в переменной окружения BOT_TOKEN.")
     dp.include_router(router)
     dp.include_router(admin_router)
     await dp.start_polling(bot)
