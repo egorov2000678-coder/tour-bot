@@ -239,6 +239,10 @@ class RejectForm(StatesGroup):
     comment = State()
 
 
+class SupportForm(StatesGroup):
+    message = State()
+
+
 # ----------------------- КЛАВИАТУРЫ -----------------------
 
 
@@ -372,7 +376,8 @@ def is_admin(tg_id: int) -> bool:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     user_id = db.get_or_create_user(
         message.from_user.id, message.from_user.username, message.from_user.first_name
     )
@@ -482,6 +487,16 @@ async def app_contact(message: Message, state: FSMContext):
     await state.update_data(contact=contact)
 
     data = await state.get_data()
+    required_keys = ["destination", "dates", "adults", "children", "budget", "wishes", "contact"]
+    if not all(k in data for k in required_keys):
+        await message.answer(
+            "Произошла ошибка при сохранении заявки. "
+            "Пожалуйста, начните оформление заново."
+        )
+        await state.clear()
+        await start_app_form(message, state)
+        return
+
     text = (
         "📝 <b>Проверьте заявку:</b>\n\n"
         f"<b>Направление:</b> {data['destination']}\n"
@@ -512,6 +527,16 @@ async def app_restart(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "app:send")
 async def app_send(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    required_keys = ["destination", "dates", "adults", "children", "budget", "wishes", "contact"]
+    if not all(k in data for k in required_keys):
+        await callback.message.answer(
+            "Произошла ошибка при сохранении заявки. "
+            "Пожалуйста, начните оформление заново через «🏖 Подобрать тур»."
+        )
+        await state.clear()
+        await callback.answer()
+        return
+
     await state.clear()
 
     user_row = db.get_user_by_tg(callback.from_user.id)
@@ -709,34 +734,17 @@ async def faq(message: Message):
 
 
 @router.message(StateFilter(None), F.text == "🆘 Связаться с менеджером")
-async def contact_manager(message: Message):
+async def contact_manager_start(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(SupportForm.message)
     await message.answer(
         "🆘 <b>Связь с менеджером</b>\n\n"
-        "Опишите свой вопрос одним сообщением. Мы увидим его и ответим вам в этом чате.",
+        "Опишите свой вопрос одним сообщением. Мы передадим его менеджеру.",
     )
 
 
-@router.message(
-    StateFilter(None),
-    F.text
-    & ~F.text.in_(
-        {
-            "🏖 Подобрать тур",
-            "📋 Мои заявки",
-            "ℹ️ О компании",
-            "🆘 Связаться с менеджером",
-            "🛠 Админ‑панель",
-            "🔁 Повторить заявку",
-            "❓ FAQ",
-        }
-    )
-)
-async def forward_to_admins(message: Message):
-    """
-    Любое «обычное» текстовое сообщение считаем обращением
-    к менеджеру и пересылаем админам.
-    Работает только когда НЕТ активного состояния (StateFilter(None)).
-    """
+@router.message(SupportForm.message)
+async def contact_manager_send(message: Message, state: FSMContext):
     text = (
         f"📨 Сообщение от пользователя @{message.from_user.username or 'без_username'} "
         f"(ID {message.from_user.id}):\n\n{message.text}"
@@ -748,9 +756,17 @@ async def forward_to_admins(message: Message):
             sent = True
         except Exception:
             pass
+
+    await state.clear()
+
     if sent:
         await message.answer(
-            "Ваше сообщение передано менеджеру. Постараемся ответить как можно скорее."
+            "Ваше сообщение передано менеджеру. "
+            "Мы ответим вам в этом чате."
+        )
+    else:
+        await message.answer(
+            "Не удалось передать сообщение менеджеру. Попробуйте позже."
         )
 
 
@@ -764,8 +780,8 @@ async def user_newapp(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "user:contact")
-async def user_contact(callback: CallbackQuery):
-    await contact_manager(callback.message)
+async def user_contact(callback: CallbackQuery, state: FSMContext):
+    await contact_manager_start(callback.message, state)
     await callback.answer()
 
 
