@@ -25,7 +25,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8216135835:AAE91Pn47KnHmtGG-QWsSSQnp4G-0xFW6ig"
 
 # сюда впиши свои Telegram‑ID админов, например {111111111, 222222222}
-ADMINS = {5240248802}
+ADMINS = {5240248802, 553539259}
 
 DB_PATH = "tour_agency.db"
 # =========================================================
