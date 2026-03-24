@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -476,14 +477,25 @@ async def app_wishes(message: Message, state: FSMContext):
     )
     await message.answer(
         "📞 <b>Шаг 7 из 7.</b>\n\n"
-        "Как с вами удобнее связаться? Укажите телефон, @username или e‑mail.\n"
-        f"По умолчанию можем использовать: <b>{default_contact}</b> (если подходит — просто отправьте его)."
+        "Оставьте, пожалуйста, контакт для связи: только номер телефона.\n"
+        "Только номер РФ: +7XXXXXXXXXX или 8XXXXXXXXXX.\n"
+        f"По умолчанию можем использовать: <b>{default_contact}</b> (если это номер телефона — просто отправьте его)."
     )
 
 
 @router.message(AppForm.contact)
 async def app_contact(message: Message, state: FSMContext):
     contact = message.text.strip()
+    normalized = re.sub(r"[^\d+]", "", contact)
+    normalized = normalized.replace("+", "", 1) if normalized.startswith("+") else normalized
+
+    # Допускаем только номера РФ: +7XXXXXXXXXX или 8XXXXXXXXXX (ровно 11 цифр).
+    if not re.fullmatch(r"(7|8)\d{10}", normalized):
+        await message.answer(
+            "Пожалуйста, укажите корректный номер телефона РФ.\n"
+            "Пример: <b>+79991234567</b> или <b>89991234567</b>."
+        )
+        return
     await state.update_data(contact=contact)
 
     data = await state.get_data()
