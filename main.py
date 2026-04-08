@@ -1,5 +1,6 @@
 import os
 import asyncio
+import html
 import sqlite3
 import re
 from datetime import datetime
@@ -23,7 +24,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ====================== НАСТРОЙКИ =========================
 # На Render токен задаём переменной окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8216135835:AAE91Pn47KnHmtGG-QWsSSQnp4G-0xFW6ig"
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "7974067391:AAHVchxLtfMVaknN5qHPyAoA2hOnSzE8GdE"
 
 # сюда впиши свои Telegram‑ID админов, например {111111111, 222222222}
 ADMINS = {5240248802, 553539259}
@@ -83,6 +84,109 @@ class Database:
         """
         )
 
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            application_id INTEGER UNIQUE NOT NULL,
+            tg_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            stars INTEGER NOT NULL,
+            body TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (application_id) REFERENCES applications(id)
+        );
+        """
+        )
+
+        self.conn.commit()
+
+    # --- отзывы ---
+
+    def review_for_application_exists(self, application_id: int) -> bool:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM reviews WHERE application_id=? LIMIT 1",
+            (application_id,),
+        )
+        return cur.fetchone() is not None
+
+    def get_application_tg_id(self, application_id: int) -> Optional[int]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT tg_id FROM applications WHERE id=?", (application_id,))
+        row = cur.fetchone()
+        return int(row["tg_id"]) if row else None
+
+    def create_review(
+        self,
+        application_id: int,
+        tg_id: int,
+        username: Optional[str],
+        first_name: Optional[str],
+        stars: int,
+        body: Optional[str],
+    ) -> int:
+        cur = self.conn.cursor()
+        now = self._now()
+        cur.execute(
+            """
+            INSERT INTO reviews (
+                application_id, tg_id, username, first_name,
+                stars, body, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                application_id,
+                tg_id,
+                username,
+                first_name,
+                stars,
+                (body or "").strip() or None,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def list_reviews_newest_first(self, limit: int = 500) -> List[sqlite3.Row]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM reviews
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+    def get_review(self, review_id: int) -> Optional[sqlite3.Row]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM reviews WHERE id=?", (review_id,))
+        return cur.fetchone()
+
+    def update_review_body(self, review_id: int, body: Optional[str]) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE reviews SET body=?, updated_at=? WHERE id=?",
+            (body, self._now(), review_id),
+        )
+        self.conn.commit()
+
+    def update_review_stars(self, review_id: int, stars: int) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE reviews SET stars=?, updated_at=? WHERE id=?",
+            (stars, self._now(), review_id),
+        )
+        self.conn.commit()
+
+    def delete_review(self, review_id: int) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM reviews WHERE id=?", (review_id,))
         self.conn.commit()
 
     def _now(self) -> str:
@@ -244,6 +348,14 @@ class SupportForm(StatesGroup):
     message = State()
 
 
+class ReviewForm(StatesGroup):
+    waiting_text = State()
+
+
+class AdminReviewForm(StatesGroup):
+    waiting_body = State()
+
+
 # ----------------------- КЛАВИАТУРЫ -----------------------
 
 
@@ -254,7 +366,10 @@ def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
             KeyboardButton(text="📋 Мои заявки"),
         ],
         [
+            KeyboardButton(text="⭐ Отзывы клиентов"),
             KeyboardButton(text="ℹ️ О компании"),
+        ],
+        [
             KeyboardButton(text="🆘 Связаться с менеджером"),
         ],
         [
@@ -280,6 +395,9 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="📊 Все заявки", callback_data="adm:list:all"),
+            ],
+            [
+                InlineKeyboardButton(text="⭐ Управление отзывами", callback_data="admrev:list"),
             ],
         ]
     )
@@ -355,6 +473,179 @@ def repeat_confirm_kb(app_id: int) -> InlineKeyboardMarkup:
                 )
             ],
         ]
+    )
+
+
+def review_prompt_kb(app_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⭐ Оставить отзыв",
+                    callback_data=f"rev:start:{app_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⏭ Пропустить",
+                    callback_data="rev:skip",
+                )
+            ],
+        ]
+    )
+
+
+def review_stars_kb(app_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"{i} ⭐", callback_data=f"rev:rate:{app_id}:{i}")
+                for i in range(1, 6)
+            ]
+        ]
+    )
+
+
+def review_text_options_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✨ Только оценка (без текста)",
+                    callback_data="rev:notext",
+                )
+            ],
+        ]
+    )
+
+
+def stars_row(n: int) -> str:
+    n = max(1, min(5, n))
+    return "⭐" * n + "☆" * (5 - n)
+
+
+def admin_reviews_list_kb(rows: List[sqlite3.Row]) -> InlineKeyboardMarkup:
+    lines: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for r in rows:
+        row.append(
+            InlineKeyboardButton(
+                text=f"#{r['id']} · {r['stars']}⭐",
+                callback_data=f"admrev:open:{r['id']}",
+            )
+        )
+        if len(row) >= 3:
+            lines.append(row)
+            row = []
+    if row:
+        lines.append(row)
+    lines.append(
+        [InlineKeyboardButton(text="⬅️ В админ‑панель", callback_data="admrev:panel")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
+def admin_review_manage_kb(review_id: int) -> InlineKeyboardMarkup:
+    star_row = [
+        InlineKeyboardButton(text=f"{i}⭐", callback_data=f"admrev:star:{review_id}:{i}")
+        for i in range(1, 6)
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Изменить текст",
+                    callback_data=f"admrev:edittext:{review_id}",
+                )
+            ],
+            star_row[:3],
+            star_row[3:],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"admrev:delask:{review_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="📋 К списку отзывов", callback_data="admrev:list"),
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ В админ‑панель", callback_data="admrev:panel"),
+            ],
+        ]
+    )
+
+
+def admin_review_delete_confirm_kb(review_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, удалить",
+                    callback_data=f"admrev:delyes:{review_id}",
+                ),
+                InlineKeyboardButton(
+                    text="↩️ Отмена",
+                    callback_data=f"admrev:open:{review_id}",
+                ),
+            ],
+        ]
+    )
+
+
+def format_public_reviews_block(rows: List[sqlite3.Row]) -> str:
+    if not rows:
+        return (
+            "⭐️ <b>Отзывы клиентов</b>\n\n"
+            "Пока отзывов нет. После отправки заявки бот предложит оставить оценку."
+        )
+    head = "⭐️ <b>Отзывы клиентов Anex</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    reserve = 120
+    max_len = 4096
+    parts: List[str] = []
+    pos = 0
+    total = len(head)
+    while pos < len(rows) and total < max_len - reserve:
+        r = rows[pos]
+        who = r["first_name"] or (f"@{r['username']}" if r["username"] else "Клиент")
+        who_e = html.escape(str(who))
+        body_raw = r["body"]
+        if body_raw:
+            body_e = html.escape(str(body_raw))
+            body_line = body_e
+        else:
+            body_line = "<i>без текста</i>"
+        block = (
+            f"▸ <b>#{r['id']}</b>  {stars_row(int(r['stars']))}\n"
+            f"👤 {who_e}\n"
+            f"💬 {body_line}\n"
+            f"───────────────"
+        )
+        sep = "\n\n" if parts else ""
+        if total + len(sep) + len(block) > max_len - reserve:
+            break
+        parts.append(block)
+        total += len(sep) + len(block)
+        pos += 1
+    text = head + "\n\n".join(parts)
+    rest = len(rows) - pos
+    if rest > 0:
+        text += f"\n\n<i>… и ещё {rest} отзыв(ов) — сообщение ограничено длиной Telegram.</i>"
+    return text
+
+
+def format_admin_review_caption(r: sqlite3.Row) -> str:
+    who = r["first_name"] or (f"@{r['username']}" if r["username"] else "Клиент")
+    who_e = html.escape(str(who))
+    body_raw = r["body"]
+    body_e = html.escape(str(body_raw)) if body_raw else "—"
+    return (
+        f"📝 <b>Отзыв №{r['id']}</b>\n"
+        f"Заявка: №{r['application_id']}\n"
+        f"Клиент: {who_e} (tg {r['tg_id']})\n"
+        f"Оценка: {stars_row(int(r['stars']))}\n"
+        f"Текст:\n{body_e}\n"
+        f"<i>Создан: {r['created_at']}</i>"
     )
 
 
@@ -565,6 +856,10 @@ async def app_send(callback: CallbackQuery, state: FSMContext):
         "Мы свяжемся с вами в ближайшее время.",
         reply_markup=main_menu_kb(is_admin=is_admin(callback.from_user.id)),
     )
+    await callback.message.answer(
+        "Хотите оставить короткий отзыв о сервисе?",
+        reply_markup=review_prompt_kb(app_id),
+    )
     await callback.answer("Заявка отправлена")
 
     summary = (
@@ -685,6 +980,10 @@ async def repeat_send(callback: CallbackQuery):
         f"(на основе заявки №{app_id})",
         reply_markup=main_menu_kb(is_admin=is_admin(callback.from_user.id)),
     )
+    await callback.message.answer(
+        "Хотите оставить короткий отзыв о сервисе?",
+        reply_markup=review_prompt_kb(new_app_id),
+    )
     await callback.answer("Заявка повторена")
 
     summary = (
@@ -715,7 +1014,155 @@ async def repeat_cancel(callback: CallbackQuery):
     await callback.answer()
 
 
+# ---------- Отзывы (пользователь) ----------
+
+
+@router.callback_query(F.data == "rev:skip")
+async def rev_skip(callback: CallbackQuery):
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Без проблем")
+
+
+@router.callback_query(F.data.startswith("rev:start:"))
+async def rev_start(callback: CallbackQuery, state: FSMContext):
+    app_id = int(callback.data.split(":")[2])
+    if db.review_for_application_exists(app_id):
+        await callback.answer("По этой заявке отзыв уже оставлен.", show_alert=True)
+        return
+    owner = db.get_application_tg_id(app_id)
+    if owner is None or owner != callback.from_user.id:
+        await callback.answer("Можно оставить отзыв только по своей заявке.", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.answer(
+        "Выберите оценку от 1 до 5:",
+        reply_markup=review_stars_kb(app_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rev:rate:"))
+async def rev_rate(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    app_id = int(parts[2])
+    stars = int(parts[3])
+    if stars < 1 or stars > 5:
+        await callback.answer()
+        return
+    if db.review_for_application_exists(app_id):
+        await callback.answer("По этой заявке отзыв уже есть.", show_alert=True)
+        return
+    owner = db.get_application_tg_id(app_id)
+    if owner is None or owner != callback.from_user.id:
+        await callback.answer("Это не ваша заявка.", show_alert=True)
+        return
+    await state.set_state(ReviewForm.waiting_text)
+    await state.update_data(rev_app_id=app_id, rev_stars=stars)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
+        f"Оценка: {stars_row(stars)}\n\n"
+        "Напишите текст отзыва одним сообщением или нажмите кнопку ниже, "
+        "если достаточно только оценки.",
+        reply_markup=review_text_options_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rev:notext")
+async def rev_notext(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    app_id = data.get("rev_app_id")
+    stars = data.get("rev_stars")
+    if app_id is None or stars is None:
+        await callback.answer("Сначала выберите оценку звёздами.", show_alert=True)
+        return
+    if db.review_for_application_exists(app_id):
+        await state.clear()
+        await callback.answer("Отзыв уже сохранён.", show_alert=True)
+        return
+    owner = db.get_application_tg_id(app_id)
+    if owner is None or owner != callback.from_user.id:
+        await state.clear()
+        await callback.answer("Ошибка доступа.", show_alert=True)
+        return
+    try:
+        db.create_review(
+            app_id,
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.first_name,
+            int(stars),
+            None,
+        )
+    except sqlite3.IntegrityError:
+        await state.clear()
+        await callback.answer("Отзыв уже был сохранён.", show_alert=True)
+        return
+    await state.clear()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Спасибо!")
+    await callback.message.answer("✅ Спасибо за отзыв! Он появится в разделе «⭐ Отзывы клиентов».")
+
+
+@router.message(ReviewForm.waiting_text)
+async def rev_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    app_id = data.get("rev_app_id")
+    stars = data.get("rev_stars")
+    if app_id is None or stars is None:
+        await state.clear()
+        await message.answer("Сессия отзыва сброшена. Начните с кнопки под заявкой.")
+        return
+    if db.review_for_application_exists(app_id):
+        await state.clear()
+        await message.answer("По этой заявке отзыв уже оставлен.")
+        return
+    owner = db.get_application_tg_id(app_id)
+    if owner is None or owner != message.from_user.id:
+        await state.clear()
+        await message.answer("Ошибка доступа.")
+        return
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("Введите текст отзыва или нажмите «Только оценка».")
+        return
+    if len(body) > 2000:
+        body = body[:2000]
+    try:
+        db.create_review(
+            app_id,
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
+            int(stars),
+            body,
+        )
+    except sqlite3.IntegrityError:
+        await state.clear()
+        await message.answer("По этой заявке отзыв уже сохранён.")
+        return
+    await state.clear()
+    await message.answer(
+        "✅ Спасибо за отзыв! Он появится в разделе «⭐ Отзывы клиентов»."
+    )
+
+
 # ---------- Инфо, FAQ и поддержка ----------
+
+
+@router.message(StateFilter(None), F.text == "⭐ Отзывы клиентов")
+async def show_public_reviews(message: Message):
+    rows = db.list_reviews_newest_first(limit=200)
+    await message.answer(format_public_reviews_block(rows))
 
 
 @router.message(StateFilter(None), F.text == "ℹ️ О компании")
@@ -1024,6 +1471,181 @@ async def admin_reject_finish(message: Message, state: FSMContext):
         await bot.send_message(a["tg_id"], text, reply_markup=user_after_status_kb())
     except Exception:
         pass
+
+
+# ---------- Админ: отзывы ----------
+
+
+@admin_router.callback_query(F.data == "admrev:panel")
+async def admrev_panel(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.answer(
+        "🛠 <b>Админ‑панель Anex</b>\n\n"
+        "Выберите, какие заявки хотите посмотреть.",
+        reply_markup=admin_panel_kb(),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admrev:list")
+async def admrev_list(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    rows = db.list_reviews_newest_first(limit=25)
+    back = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В админ‑панель", callback_data="admrev:panel")]
+        ]
+    )
+    if not rows:
+        await callback.message.answer(
+            "⭐ <b>Отзывы</b>\n\nПока нет ни одного отзыва.",
+            reply_markup=back,
+        )
+        await callback.answer()
+        return
+    await callback.message.answer(
+        "⭐ <b>Управление отзывами</b>\n\nВыберите отзыв (последние 25):",
+        reply_markup=admin_reviews_list_kb(rows),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admrev:open:"))
+async def admrev_open(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    review_id = int(callback.data.split(":")[2])
+    r = db.get_review(review_id)
+    if not r:
+        await callback.message.answer("Отзыв не найден.")
+        await callback.answer()
+        return
+    await callback.message.answer(
+        format_admin_review_caption(r),
+        reply_markup=admin_review_manage_kb(review_id),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admrev:star:"))
+async def admrev_star(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    review_id = int(parts[2])
+    stars = int(parts[3])
+    if stars < 1 or stars > 5:
+        await callback.answer()
+        return
+    r = db.get_review(review_id)
+    if not r:
+        await callback.answer("Отзыв удалён.", show_alert=True)
+        return
+    db.update_review_stars(review_id, stars)
+    r = db.get_review(review_id)
+    await callback.message.answer(
+        f"Оценка обновлена.\n\n{format_admin_review_caption(r)}",
+        reply_markup=admin_review_manage_kb(review_id),
+    )
+    await callback.answer("Сохранено")
+
+
+@admin_router.callback_query(F.data.startswith("admrev:edittext:"))
+async def admrev_edittext(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    review_id = int(callback.data.split(":")[2])
+    r = db.get_review(review_id)
+    if not r:
+        await callback.answer("Отзыв не найден.", show_alert=True)
+        return
+    await state.set_state(AdminReviewForm.waiting_body)
+    await state.update_data(adm_rev_id=review_id)
+    await callback.message.answer(
+        f"Отзыв №{review_id}. Отправьте новый текст одним сообщением.\n"
+        "Чтобы убрать текст отзыва, отправьте «-»."
+    )
+    await callback.answer()
+
+
+@admin_router.message(AdminReviewForm.waiting_body)
+async def admrev_edittext_save(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    review_id = data.get("adm_rev_id")
+    if not review_id:
+        await state.clear()
+        return
+    r = db.get_review(review_id)
+    if not r:
+        await state.clear()
+        await message.answer("Отзыв не найден.")
+        return
+    raw = (message.text or "").strip()
+    if raw == "-":
+        db.update_review_body(review_id, None)
+    else:
+        db.update_review_body(review_id, raw[:2000])
+    await state.clear()
+    r = db.get_review(review_id)
+    await message.answer(
+        "Текст обновлён.\n\n" + format_admin_review_caption(r),
+        reply_markup=admin_review_manage_kb(review_id),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("admrev:delask:"))
+async def admrev_del_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    review_id = int(callback.data.split(":")[2])
+    r = db.get_review(review_id)
+    if not r:
+        await callback.answer("Отзыв не найден.", show_alert=True)
+        return
+    await callback.message.answer(
+        f"Удалить отзыв №{review_id}?",
+        reply_markup=admin_review_delete_confirm_kb(review_id),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admrev:delyes:"))
+async def admrev_del_yes(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    review_id = int(callback.data.split(":")[2])
+    db.delete_review(review_id)
+    await state.clear()
+    await callback.message.answer(f"Отзыв №{review_id} удалён.")
+    rows = db.list_reviews_newest_first(limit=25)
+    back = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В админ‑панель", callback_data="admrev:panel")]
+        ]
+    )
+    if not rows:
+        await callback.message.answer("⭐ Отзывов больше нет.", reply_markup=back)
+    else:
+        await callback.message.answer(
+            "⭐ <b>Управление отзывами</b>",
+            reply_markup=admin_reviews_list_kb(rows),
+        )
+    await callback.answer("Удалено")
 
 
 # ------------------ ЗАПУСК БОТА ---------------------------
